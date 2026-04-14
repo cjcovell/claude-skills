@@ -251,9 +251,70 @@ Add a "Feedback" tab to `/admin` with:
 | DB schema | `scripts/007_*.sql`, `008_*.sql` | RLS: users own rows, admins see all |
 | Rate limiter | `lib/rate-limit.ts` | In-memory sliding window, periodic cleanup |
 
+## 6. CLAUDE.md Startup Routine
+
+After scaffolding all code above, write a startup routine into the project's `CLAUDE.md` (create the file if it doesn't exist). This closes the feedback loop — Claude checks for unresolved feedback at the start of every session.
+
+**Detect the right query method:**
+
+1. Check if Supabase MCP is available: look for `mcp__supabase` tools in the session, or a Supabase MCP entry in `.claude/settings.local.json`
+2. If MCP is available, write the MCP variant:
+
+```markdown
+## Startup Routine
+
+At the start of each session, check for unresolved user feedback:
+
+Run via Supabase MCP:
+`SELECT * FROM public.feedback WHERE resolved_at IS NULL ORDER BY created_at DESC`
+
+Summarize open feedback items for the user and suggest which to address. Prioritize bugs, then feature requests, then general feedback.
+
+After fixing an item, mark it resolved:
+`UPDATE public.feedback SET resolved_at = now() WHERE id = '<uuid>'`
+
+Then re-query to confirm it dropped off. Do a fresh-eyes review of all changed code before committing.
+```
+
+3. If MCP is not available, read `NEXT_PUBLIC_SUPABASE_URL` from `.env.local` to extract the project ref (the subdomain: `https://<PROJECT_REF>.supabase.co`), and write the curl variant:
+
+````markdown
+## Startup Routine
+
+At the start of each session, check for unresolved user feedback:
+
+```bash
+curl -s "https://<PROJECT_REF>.supabase.co/rest/v1/feedback?select=*&resolved_at=is.null&order=created_at.desc" \
+  -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" | python3 -m json.tool
+```
+
+The `SUPABASE_SERVICE_ROLE_KEY` is in `.env.local`. Summarize open feedback items for the user and suggest which to address. Prioritize bugs, then feature requests, then general feedback.
+
+After fixing an item, mark it resolved via PATCH `/api/admin/feedback` with `{ "id": "<uuid>", "resolved": true }`, or run:
+`UPDATE public.feedback SET resolved_at = now() WHERE id = '<uuid>'` in the Supabase SQL editor.
+
+Then re-query to confirm it dropped off. Do a fresh-eyes review of all changed code before committing.
+````
+
+**Replace `<PROJECT_REF>` with the actual value** before writing to CLAUDE.md.
+
+## 7. Verification
+
+Before declaring the setup complete, verify all five steps pass:
+
+1. **TypeScript check** — Run the project's typecheck (`npx tsc --noEmit`, `pnpm typecheck`, etc.). Fix any errors this change introduced.
+2. **Dev server boots** — Start the dev server and confirm no runtime errors in the console.
+3. **Smoke test** — Sign in, see the feedback button bottom-right, open the dialog, submit a test message. Confirm the toast says "Thanks for your feedback!" and the row appears in the `feedback` table with correct `user_id`, `type`, `message`.
+4. **Startup query works** — Run the startup query (MCP or curl). Confirm the test row comes back.
+5. **Resolution loop closes** — Mark that row resolved and re-run the startup query. Confirm the row no longer appears.
+
+Do not claim the setup is done based on code compilation alone — the whole point is the closed loop.
+
 ## Common Mistakes
 
 - **Forgetting RLS policies** — without admin SELECT/UPDATE policies, the admin API returns empty results even with service role
 - **Missing Toaster** — feedback button uses `sonner` toasts; add `<Toaster />` in layout
 - **No rate limiting** — users can spam feedback; always add rate limiting on the POST endpoint
 - **Single-click resolve** — use toggle (resolve/reopen) so admins can undo mistakes
+- **Not writing the CLAUDE.md startup routine** — the feedback system is only half the value without the closed loop. Always scaffold the startup routine as part of setup.
